@@ -1,0 +1,254 @@
+//! NTP synchronization monitoring for distributed tracing.
+
+use std::process::Command;
+use std::time::{Duration, Instant};
+
+use anyhow::{bail, Context, Result};
+
+const NANOS_PER_SEC: f64 = 1e9;
+
+/// NTP synchronization status from chrony.
+#[derive(Debug, Clone, Default)]
+pub struct NTPStatus {
+    pub synchronized: bool,
+    /// Current offset from NTP server in nanoseconds (positive = local ahead).
+    pub offset_ns: i64,
+    /// Estimated uncertainty bound for timestamps in nanoseconds.
+    /// Computed as root_delay/2 + root_dispersion.
+    pub uncertainty_ns: u64,
+    pub stratum: u8,
+    pub captured_at: Option<Instant>,
+}
+
+impl NTPStatus {
+    pub fn sync_status(&self) -> SyncDiagnostic {
+        if !self.synchronized {
+            SyncDiagnostic::Unsynchronized
+        } else if self.uncertainty_ns > 10_000_000 {
+            SyncDiagnostic::Degraded {
+                reason: format!("High uncertainty: {}ms", self.uncertainty_ns / 1_000_000),
+            }
+        } else if self.offset_ns.abs() > 50_000_000 {
+            SyncDiagnostic::Degraded {
+                reason: format!("High offset: {}ms", self.offset_ns.abs() / 1_000_000),
+            }
+        } else {
+            SyncDiagnostic::Synchronized {
+                offset_ms: self.offset_ns as f64 / 1_000_000.0,
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub enum SyncDiagnostic {
+    Synchronized {
+        offset_ms: f64,
+    },
+    Degraded {
+        reason: String,
+    },
+    #[default]
+    Unsynchronized,
+}
+
+/// Queries chrony and caches results to avoid excessive subprocess spawning.
+#[derive(Default)]
+pub struct NTPMonitor {
+    cached_status: Option<NTPStatus>,
+    cache_duration: Duration,
+}
+
+impl NTPMonitor {
+    const DEFAULT_CACHE_DURATION: Duration = Duration::from_secs(5);
+
+    /// Reference IDs indicating non-synchronized states.
+    const CHRONY_REFID_UNSYNCED: &'static str = "00000000";
+    const CHRONY_REFID_LOCALHOST: &'static str = "7F7F0101";
+
+    pub fn new() -> Self {
+        Self {
+            cached_status: None,
+            cache_duration: Self::DEFAULT_CACHE_DURATION,
+        }
+    }
+
+    pub fn with_cache_duration(cache_duration: Duration) -> Self {
+        Self {
+            cached_status: None,
+            cache_duration,
+        }
+    }
+
+    /// Get the current NTP status, using cache if valid.
+    pub fn get_status(&mut self) -> Result<NTPStatus> {
+        if let Some(ref status) = self.cached_status {
+            if let Some(captured_at) = status.captured_at {
+                if captured_at.elapsed() < self.cache_duration {
+                    return Ok(status.clone());
+                }
+            }
+        }
+
+        let status = self.query_chrony()?;
+        self.cached_status = Some(status.clone());
+        Ok(status)
+    }
+
+    /// Force a fresh query, bypassing cache.
+    pub fn refresh(&mut self) -> Result<NTPStatus> {
+        let status = self.query_chrony()?;
+        self.cached_status = Some(status.clone());
+        Ok(status)
+    }
+
+    /// Returns a default "unsynchronized" status on failure.
+    pub fn get_status_or_default(&mut self) -> NTPStatus {
+        self.get_status().unwrap_or_default()
+    }
+
+    fn query_chrony(&self) -> Result<NTPStatus> {
+        let output = Command::new("chronyc")
+            .args(["-c", "tracking"])
+            .output()
+            .context("Failed to run chronyc")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("chronyc failed: {}", stderr);
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        self.parse_chrony_output(&stdout)
+    }
+
+    fn parse_chrony_output(&self, output: &str) -> Result<NTPStatus> {
+        let line = output.trim();
+        if line.is_empty() {
+            bail!("Empty output from chronyc");
+        }
+
+        let fields: Vec<&str> = line.split(',').collect();
+        if fields.len() < 13 {
+            bail!(
+                "Unexpected chronyc output format: expected 13+ fields, got {}",
+                fields.len()
+            );
+        }
+
+        let ref_id = fields[0];
+        let synchronized =
+            ref_id != Self::CHRONY_REFID_UNSYNCED && ref_id != Self::CHRONY_REFID_LOCALHOST;
+
+        let stratum: u8 = fields[2].parse().context("Failed to parse stratum")?;
+
+        let offset_sec: f64 = fields[4].parse().context("Failed to parse offset")?;
+        let offset_ns = (offset_sec * NANOS_PER_SEC) as i64;
+
+        // Uncertainty = root_delay/2 + root_dispersion
+        let root_delay_sec: f64 = fields[10].parse().unwrap_or(0.0);
+        let root_disp_sec: f64 = fields[11].parse().unwrap_or(0.001);
+        let uncertainty_ns = ((root_delay_sec / 2.0 + root_disp_sec) * NANOS_PER_SEC) as u64;
+
+        Ok(NTPStatus {
+            synchronized,
+            offset_ns,
+            uncertainty_ns,
+            stratum,
+            captured_at: Some(Instant::now()),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_chrony_output() {
+        let monitor = NTPMonitor::new();
+
+        // Synchronized.
+        let output = "C0A80001,192.168.0.1,2,1234567890.123,-0.000001234,\
+                      -0.000001234,0.000000567,1.234,0.001,0.002,0.015,\
+                      0.001,64,Normal";
+        let status = monitor.parse_chrony_output(output).unwrap();
+        assert!(status.synchronized);
+        assert_eq!(status.stratum, 2);
+        assert!(status.offset_ns < 0);
+        assert_eq!(status.uncertainty_ns, 8_500_000);
+
+        // Unsynchronized (null refid).
+        let output = "00000000,,16,0,0,0,0,0,0,0,0,0,0,Not synchronised";
+        let status = monitor.parse_chrony_output(output).unwrap();
+        assert!(!status.synchronized);
+        assert_eq!(status.stratum, 16);
+
+        // Unsynchronized (localhost refid).
+        let output = "7F7F0101,127.127.1.1,10,0,0,0,0,0,0,0,0,0.001,0,Normal";
+        let status = monitor.parse_chrony_output(output).unwrap();
+        assert!(!status.synchronized);
+    }
+
+    #[test]
+    fn parse_chrony_output_localhost() {
+        let monitor = NTPMonitor::new();
+        let output = "7F7F0101,127.127.1.1,10,0,0,0,0,0,0,0,0,0.001,0,Normal";
+
+        let status = monitor.parse_chrony_output(output).unwrap();
+
+        assert!(!status.synchronized);
+    }
+
+    #[test]
+    fn sync_status_classification() {
+        // synchronized.
+        let status = NTPStatus {
+            synchronized: true,
+            offset_ns: 1_000_000,    // 1ms
+            uncertainty_ns: 500_000, // 0.5ms
+            stratum: 2,
+            captured_at: None,
+        };
+        assert!(matches!(
+            status.sync_status(),
+            SyncDiagnostic::Synchronized { .. }
+        ));
+
+        // Degraded - high uncertainty
+        let status = NTPStatus {
+            synchronized: true,
+            offset_ns: 1_000_000,
+            uncertainty_ns: 15_000_000, // 15ms
+            stratum: 2,
+            captured_at: None,
+        };
+        assert!(matches!(
+            status.sync_status(),
+            SyncDiagnostic::Degraded { .. }
+        ));
+
+        // Degraded - high offset
+        let status = NTPStatus {
+            synchronized: true,
+            offset_ns: 100_000_000, // 100ms
+            uncertainty_ns: 1_000_000,
+            stratum: 2,
+            captured_at: None,
+        };
+        assert!(matches!(
+            status.sync_status(),
+            SyncDiagnostic::Degraded { .. }
+        ));
+
+        // Unsynchronized
+        let status = NTPStatus {
+            synchronized: false,
+            ..Default::default()
+        };
+        assert!(matches!(
+            status.sync_status(),
+            SyncDiagnostic::Unsynchronized
+        ));
+    }
+}
