@@ -4,6 +4,7 @@
 //! within the tool.
 
 pub(crate) mod bpf_sys;
+pub(crate) mod distributed;
 pub(crate) mod events;
 pub(crate) mod filters;
 pub(crate) mod inspect;
