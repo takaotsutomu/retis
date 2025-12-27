@@ -75,6 +75,8 @@ pub struct Event {
     pub ct: Option<CtEvent>,
     /// Startup event.
     pub startup: Option<StartupEvent>,
+    /// Distributed tracing metadata.
+    pub distributed: Option<DistributedMetadata>,
 
     #[cfg(feature = "test-events")]
     pub test: Option<TestEvent>,
