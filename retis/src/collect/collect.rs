@@ -26,6 +26,7 @@ use crate::{
     cli::{CliDisplayFormat, MainConfig},
     collect::collector::section_factories,
     core::{
+        distributed::{NtpMonitor, NtpSyncStatus},
         events::{BpfEventsFactory, EventResult, RetisEventsFactory, SectionFactories},
         filters::{
             filters::{BpfFilter, Filter},
@@ -117,6 +118,11 @@ pub(crate) struct Collectors {
     mounted: Option<PathBuf>,
     // Monotonic clock offset stored once and reused.
     monotonic_offset: TimeSpec,
+    // Distributed tracing components. Only initialized if --distributed.
+    distributed_enabled: bool,
+    monotonic_offset_cache: Option<MonotonicOffsetCache>,
+    ntp_monitor: Option<NtpMonitor>,
+    node_id: [u8; 16],
 }
 
 impl Collectors {
@@ -136,7 +142,102 @@ impl Collectors {
             events_factory: Arc::new(RetisEventsFactory::default()),
             mounted: None,
             monotonic_offset: monotonic_clock_offset()?,
+            distributed_enabled: false,
+            monotonic_offset_cache: None,
+            ntp_monitor: None,
+            node_id: [0u8; 16],
         })
+    }
+
+    fn init_distributed(&mut self, collect: &Collect) -> Result<()> {
+        if !collect.distributed {
+            return Ok(());
+        }
+
+        info!("Distributed tracing mode enabled");
+
+        self.monotonic_offset_cache = Some(MonotonicOffsetCache::new()?);
+        self.ntp_monitor = Some(NtpMonitor::new());
+        self.node_id = Self::generate_node_id();
+        self.distributed_enabled = true;
+
+        if let Some(ref name) = collect.node_name {
+            info!("Node name: {}", name);
+        }
+
+        if let Some(ref mut monitor) = self.ntp_monitor {
+            match monitor.get_status() {
+                Ok(status) => {
+                    info!(
+                        "NTP status: {} (offset: {}µs, stratum: {})",
+                        if status.synchronized {
+                            "synchronized"
+                        } else {
+                            "not synchronized"
+                        },
+                        status.offset_ns / 1000,
+                        status.stratum
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        "Could not get NTP status: {}. Clock sync quality unknown.",
+                        e
+                    );
+                }
+            }
+        }
+
+        if collect.aggregator.is_some() {
+            warn!("--aggregator specified but aggregator support not yet implemented");
+        }
+
+        Ok(())
+    }
+
+    fn generate_node_id() -> [u8; 16] {
+        *uuid::Uuid::new_v4().as_bytes()
+    }
+
+    fn enrich_event(&mut self, event: &mut Event) -> Result<()> {
+        if !self.distributed_enabled {
+            return Ok(());
+        }
+
+        // Get the monotonic timestamp from the event
+        let mono_ns = event.common.as_ref().map(|c| c.timestamp).unwrap_or(0);
+
+        let epoch_ns = if let Some(ref mut cache) = self.monotonic_offset_cache {
+            cache.monotonic_to_epoch_ns(mono_ns)?
+        } else {
+            let offset_ns: i64 = self.monotonic_offset.into();
+            mono_ns as i64 + offset_ns
+        };
+
+        let (ntp_offset_ns, sync_status) = if let Some(ref mut monitor) = self.ntp_monitor {
+            match monitor.get_status() {
+                Ok(status) => {
+                    let sync = match status.sync_status() {
+                        NtpSyncStatus::Synchronized => SyncStatus::Synchronized,
+                        NtpSyncStatus::Degraded => SyncStatus::Degraded,
+                        NtpSyncStatus::Unsynchronized => SyncStatus::Unsynchronized,
+                    };
+                    (status.offset_ns, sync)
+                }
+                Err(_) => (0, SyncStatus::Unsynchronized),
+            }
+        } else {
+            (0, SyncStatus::Unsynchronized)
+        };
+
+        event.distributed = Some(DistributedMetadata::new(
+            self.node_id,
+            epoch_ns,
+            ntp_offset_ns,
+            sync_status,
+        ));
+
+        Ok(())
     }
 
     /// Setup user defined input filter.
@@ -490,6 +591,7 @@ impl Collectors {
         let mut section_factories = section_factories()?;
 
         self.run.register_term_signals()?;
+        self.init_distributed(collect)?;
         self.initial_event(&main_config.cmdline)?;
         self.init_collectors(&mut section_factories, collect)?;
         self.config_filters(collect)?;
@@ -618,6 +720,10 @@ impl Collectors {
                 Event(mut event) => {
                     if collect.probe_stack {
                         probe_stack.process_event(self.probes.runtime_mut()?, &mut event)?;
+                    }
+
+                    if let Err(e) = self.enrich_event(&mut event) {
+                        warn!("Failed to enrich event with distributed metadata: {}", e);
                     }
 
                     printers
