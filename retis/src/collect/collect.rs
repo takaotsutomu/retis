@@ -26,7 +26,7 @@ use crate::{
     cli::{CliDisplayFormat, MainConfig},
     collect::collector::section_factories,
     core::{
-        distributed::{NtpMonitor, NtpSyncStatus},
+        distributed::{NodeIdentity, NtpMonitor, NtpSyncStatus},
         events::{BpfEventsFactory, EventResult, RetisEventsFactory, SectionFactories},
         filters::{
             filters::{BpfFilter, Filter},
@@ -122,7 +122,7 @@ pub(crate) struct Collectors {
     distributed_enabled: bool,
     monotonic_offset_cache: Option<MonotonicOffsetCache>,
     ntp_monitor: Option<NtpMonitor>,
-    node_id: [u8; 16],
+    node_identity: Option<NodeIdentity>,
 }
 
 impl Collectors {
@@ -145,7 +145,7 @@ impl Collectors {
             distributed_enabled: false,
             monotonic_offset_cache: None,
             ntp_monitor: None,
-            node_id: [0u8; 16],
+            node_identity: None,
         })
     }
 
@@ -156,9 +156,12 @@ impl Collectors {
 
         info!("Distributed tracing mode enabled");
 
-        self.monotonic_offset_cache = Some(MonotonicOffsetCache::new()?);
+        let identity = NodeIdentity::load_or_create(collect.node_name.clone())?;
+        info!("Node ID: {} ({})", identity.uuid(), identity.display_name());
+
+        self.node_identity = Some(identity);
         self.ntp_monitor = Some(NtpMonitor::new());
-        self.node_id = Self::generate_node_id();
+        self.monotonic_offset_cache = Some(MonotonicOffsetCache::new()?);
         self.distributed_enabled = true;
 
         if let Some(ref name) = collect.node_name {
@@ -195,10 +198,6 @@ impl Collectors {
         Ok(())
     }
 
-    fn generate_node_id() -> [u8; 16] {
-        *uuid::Uuid::new_v4().as_bytes()
-    }
-
     fn enrich_event(&mut self, event: &mut Event) -> Result<()> {
         if !self.distributed_enabled {
             return Ok(());
@@ -231,8 +230,14 @@ impl Collectors {
                 (0, 0, SyncStatus::Unsynchronized)
             };
 
+        let node_id = self
+            .node_identity
+            .as_ref()
+            .map(|id| id.as_bytes())
+            .unwrap_or([0u8; 16]);
+
         event.distributed = Some(DistributedMetadata::new(
-            self.node_id,
+            node_id,
             epoch_ns,
             ntp_offset_ns,
             ntp_uncertainty_ns,
