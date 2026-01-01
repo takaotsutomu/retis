@@ -37,6 +37,7 @@ clap_complete = "4.4"
 elf = "0.8"
 events = {version = "1.5", path = "../retis-events", package="retis-events" }
 flate2 = "1.0"
+gethostname = "0.5"
 libbpf-rs = "=0.26.0-beta.1"
 libbpf-sys = "1.6"
 libc = "0.2"
@@ -76,3 +77,4 @@ rbpf = "0.3"
 serial_test = "3.1"
 test-case = "3.2"
 events = {version = "1.5", path = "../retis-events", package="retis-events", features = ["test-events"]}
+tempfile = "3.24.0"
