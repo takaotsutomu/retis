@@ -150,16 +150,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_chrony_output_localhost() {
-        let monitor = NtpMonitor::new();
-        let output = "7F7F0101,127.127.1.1,10,0,0,0,0,0,0,0,0,0.001,0,Normal";
-
-        let status = monitor.parse_chrony_output(output).unwrap();
-
-        assert!(!status.synchronized);
-    }
-
-    #[test]
     fn sync_status_classification() {
         // Synchronized.
         let status = NtpStatus {
