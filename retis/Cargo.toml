@@ -28,6 +28,7 @@ debug = ["dep:rbpf"]
 [dependencies]
 anyhow = "1.0"
 base64 = "0.22"
+bincode = "2.0.0-rc.3"
 btf-rs = "1.1"
 byteorder = "1.5"
 caps = "0.5"

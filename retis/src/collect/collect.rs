@@ -25,7 +25,10 @@ use crate::{
     cli::{CliDisplayFormat, MainConfig},
     collect::collector::section_factories,
     core::{
-        distributed::{NodeIdentity, NtpMonitor, NtpSyncStatus},
+        distributed::{
+            DistributedCollector, DistributedCollectorConfig, NodeIdentity, NtpMonitor,
+            NtpSyncStatus,
+        },
         events::*,
         filters::{
             filters::{BpfFilter, Filter},
@@ -122,6 +125,7 @@ pub(crate) struct Collectors {
     monotonic_offset_cache: Option<MonotonicOffsetCache>,
     ntp_monitor: Option<NtpMonitor>,
     node_identity: Option<NodeIdentity>,
+    distributed_collector: Option<DistributedCollector>,
 }
 
 impl Collectors {
@@ -145,6 +149,7 @@ impl Collectors {
             monotonic_offset_cache: None,
             ntp_monitor: None,
             node_identity: None,
+            distributed_collector: None,
         })
     }
 
@@ -190,8 +195,19 @@ impl Collectors {
             }
         }
 
-        if collect.aggregator.is_some() {
-            warn!("--aggregator specified but aggregator support not yet implemented");
+        if let Some(ref addr) = collect.aggregator {
+            let config = DistributedCollectorConfig {
+                aggregator_addr: addr.clone(),
+                ..Default::default()
+            };
+
+            let collector =
+                DistributedCollector::start(config, self.node_identity.as_ref().unwrap().clone());
+
+            info!("Distributed collector initialized, will connect to {} on first event", addr);
+            self.distributed_collector = Some(collector);
+        } else {
+            warn!("--aggregator not specified, events will not be sent to aggregator");
         }
 
         Ok(())
@@ -712,6 +728,13 @@ impl Collectors {
                     printers
                         .iter_mut()
                         .try_for_each(|p| p.process_one(&event))?;
+
+                    if let Some(ref mut collector) = self.distributed_collector {
+                        if let Err(e) = collector.process_one(&event) {
+                            warn!("Failed to send event to aggregator: {}", e);
+                        }
+                    }
+
                     eccount += 1;
                 }
                 Timeout => continue,
@@ -719,6 +742,13 @@ impl Collectors {
         }
 
         printers.iter_mut().try_for_each(|p| p.flush())?;
+
+        if let Some(ref mut collector) = self.distributed_collector {
+            if let Err(e) = collector.shutdown() {
+                warn!("Distributed collector shutdown error: {}", e);
+            }
+        }
+
         info!("{eccount} event(s) processed");
         debug!("{iccount} internal event(s) processed");
 
