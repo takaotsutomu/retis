@@ -84,15 +84,78 @@ pub(crate) struct AggregatorStatsSnapshot {
 }
 
 // =============================================================================
+// SharedBackpressure
+// =============================================================================
+
+/// Shared backpressure state visible to all connection handlers.
+pub(crate) struct SharedBackpressure {
+    paused: AtomicBool,
+    reason: Mutex<PauseReason>,
+}
+
+impl SharedBackpressure {
+    pub fn new() -> Self {
+        Self {
+            paused: AtomicBool::new(false),
+            reason: Mutex::new(PauseReason::StorageBackpressure),
+        }
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Acquire)
+    }
+
+    /// Returns true if this was a state change.
+    pub fn set_paused(&self, reason: PauseReason) -> bool {
+        let was_paused = self.paused.swap(true, Ordering::AcqRel);
+        if !was_paused {
+            *self.reason.lock().expect("reason lock not poisoned") = reason;
+        }
+        !was_paused
+    }
+
+    /// Returns true if this was a state change.
+    pub fn set_resumed(&self) -> bool {
+        self.paused.swap(false, Ordering::AcqRel)
+    }
+
+    pub fn pause_reason(&self) -> PauseReason {
+        self.reason
+            .lock()
+            .expect("reason lock not poisoned")
+            .clone()
+    }
+}
+
+impl Default for SharedBackpressure {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// =============================================================================
 // EventSink Trait
 // =============================================================================
+
+/// Result of processing a batch, including optional backpressure signal.
+pub(crate) struct ProcessResult {
+    pub status: BatchStatus,
+    pub backpressure_changed: Option<BackpressureChange>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackpressureChange {
+    NowPaused,
+    NowResumed,
+}
 
 /// Trait for handling received events.
 ///
 /// Implementations can store events to ClickHouse, files, or other backends.
 pub(crate) trait EventSink: Send {
-    /// Process a batch of events. Returns the status to send back to the collector.
-    fn process_batch(&mut self, session: &SessionInfo, batch: &EventBatch) -> Result<BatchStatus>;
+    /// Process a batch of events.
+    fn process_batch(&mut self, session: &SessionInfo, batch: &EventBatch)
+        -> Result<ProcessResult>;
 
     /// Flush any buffered data to storage.
     fn flush(&mut self) -> Result<()>;
@@ -116,13 +179,20 @@ impl LoggingEventSink {
 }
 
 impl EventSink for LoggingEventSink {
-    fn process_batch(&mut self, session: &SessionInfo, batch: &EventBatch) -> Result<BatchStatus> {
+    fn process_batch(
+        &mut self,
+        session: &SessionInfo,
+        batch: &EventBatch,
+    ) -> Result<ProcessResult> {
         debug!(
             "Received batch {} from {} ({} events)",
             batch.batch_id, session.node_name, batch.event_count
         );
         self.events_processed += batch.event_count as u64;
-        Ok(BatchStatus::Accepted)
+        Ok(ProcessResult {
+            status: BatchStatus::Accepted,
+            backpressure_changed: None,
+        })
     }
 
     fn flush(&mut self) -> Result<()> {
@@ -164,8 +234,10 @@ struct ConnectionHandler {
     sessions: Arc<RwLock<HashMap<u64, SessionInfo>>>,
     stats: Arc<AggregatorStats>,
     event_sink: Arc<Mutex<Box<dyn EventSink>>>,
+    backpressure: Arc<SharedBackpressure>,
     sequence: u64,
     registered: bool,
+    pause_sent: bool,
 }
 
 impl ConnectionHandler {
@@ -176,6 +248,7 @@ impl ConnectionHandler {
         sessions: Arc<RwLock<HashMap<u64, SessionInfo>>>,
         stats: Arc<AggregatorStats>,
         event_sink: Arc<Mutex<Box<dyn EventSink>>>,
+        backpressure: Arc<SharedBackpressure>,
     ) -> Self {
         Self {
             stream,
@@ -184,8 +257,10 @@ impl ConnectionHandler {
             sessions,
             stats,
             event_sink,
+            backpressure,
             sequence: 0,
             registered: false,
+            pause_sent: false,
         }
     }
 
@@ -302,7 +377,6 @@ impl ConnectionHandler {
     }
 
     fn handle_event_batch(&mut self, batch: EventBatch) -> Result<()> {
-        // Reject batches from unregistered connections.
         if !self.registered {
             warn!(
                 "Session {} not registered, rejecting batch",
@@ -325,7 +399,7 @@ impl ConnectionHandler {
             .cloned()
             .context("session not found")?;
 
-        let status = self
+        let result = self
             .event_sink
             .lock()
             .expect("event_sink lock should not be poisoned")
@@ -344,20 +418,51 @@ impl ConnectionHandler {
             }
         }
 
-        let events_processed = match &status {
-            BatchStatus::Accepted => batch.event_count,
-            BatchStatus::PartialFailure => batch.event_count,
+        let events_processed = match &result.status {
+            BatchStatus::Accepted | BatchStatus::PartialFailure => batch.event_count,
             BatchStatus::Rejected(_) => 0,
         };
         let events_failed = batch.event_count - events_processed;
 
         let ack = BatchAck {
             batch_id: batch.batch_id,
-            status,
+            status: result.status,
             events_processed,
             events_failed,
         };
-        self.send_message(Payload::BatchAck(ack))
+        self.send_message(Payload::BatchAck(ack))?;
+
+        self.handle_backpressure(result.backpressure_changed)
+    }
+
+    fn handle_backpressure(&mut self, changed: Option<BackpressureChange>) -> Result<()> {
+        match changed {
+            Some(BackpressureChange::NowPaused) => {
+                let reason = self.backpressure.pause_reason();
+                self.send_message(Payload::Pause(Pause { reason }))?;
+                self.pause_sent = true;
+            }
+            Some(BackpressureChange::NowResumed) => {
+                self.send_message(Payload::Resume(Resume {
+                    recommended_batch_size: None,
+                }))?;
+                self.pause_sent = false;
+            }
+            None => {
+                // Sync state for handlers that haven't sent Pause yet
+                if self.backpressure.is_paused() && !self.pause_sent {
+                    let reason = self.backpressure.pause_reason();
+                    self.send_message(Payload::Pause(Pause { reason }))?;
+                    self.pause_sent = true;
+                } else if !self.backpressure.is_paused() && self.pause_sent {
+                    self.send_message(Payload::Resume(Resume {
+                        recommended_batch_size: None,
+                    }))?;
+                    self.pause_sent = false;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn handle_heartbeat(&mut self, heartbeat: Heartbeat) -> Result<()> {
@@ -456,12 +561,17 @@ pub(crate) struct TraceAggregator {
     next_session_id: AtomicU64,
     running: Arc<AtomicBool>,
     event_sink: Arc<Mutex<Box<dyn EventSink>>>,
+    backpressure: Arc<SharedBackpressure>,
     handler_threads: Vec<JoinHandle<()>>,
 }
 
 impl TraceAggregator {
     /// Creates a new aggregator bound to the configured address.
-    pub fn new(config: AggregatorConfig, event_sink: Box<dyn EventSink>) -> Result<Self> {
+    pub fn new(
+        config: AggregatorConfig,
+        event_sink: Box<dyn EventSink>,
+        backpressure: Arc<SharedBackpressure>,
+    ) -> Result<Self> {
         let listener = TcpListener::bind(&config.listen_addr)
             .with_context(|| format!("binding to {}", config.listen_addr))?;
 
@@ -479,6 +589,7 @@ impl TraceAggregator {
             next_session_id: AtomicU64::new(1),
             running: Arc::new(AtomicBool::new(false)),
             event_sink: Arc::new(Mutex::new(event_sink)),
+            backpressure,
             handler_threads: Vec::new(),
         })
     }
@@ -519,6 +630,7 @@ impl TraceAggregator {
                         Arc::clone(&self.sessions),
                         Arc::clone(&self.stats),
                         Arc::clone(&self.event_sink),
+                        Arc::clone(&self.backpressure),
                     );
 
                     let thread = thread::Builder::new()
@@ -619,8 +731,9 @@ mod tests {
             events: vec![],
         };
 
-        let status = sink.process_batch(&session, &batch).unwrap();
-        assert!(matches!(status, BatchStatus::Accepted));
+        let result = sink.process_batch(&session, &batch).unwrap();
+        assert!(matches!(result.status, BatchStatus::Accepted));
+        assert!(result.backpressure_changed.is_none());
 
         sink.flush().unwrap();
     }
@@ -629,7 +742,8 @@ mod tests {
     fn session_registration_and_ack() {
         let config = create_test_config();
         let sink = Box::new(LoggingEventSink::new());
-        let mut aggregator = TraceAggregator::new(config, sink).unwrap();
+        let backpressure = Arc::new(SharedBackpressure::new());
+        let mut aggregator = TraceAggregator::new(config, sink, backpressure).unwrap();
 
         let addr = aggregator.listener.local_addr().unwrap();
 
@@ -686,5 +800,56 @@ mod tests {
         running.store(false, Ordering::SeqCst);
         drop(client);
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn shared_backpressure_state_transitions() {
+        let bp = SharedBackpressure::new();
+
+        assert!(!bp.is_paused());
+
+        // First pause returns true (state changed)
+        assert!(bp.set_paused(PauseReason::StorageBackpressure));
+        assert!(bp.is_paused());
+        assert!(matches!(
+            bp.pause_reason(),
+            PauseReason::StorageBackpressure
+        ));
+
+        // Second pause returns false (no change)
+        assert!(!bp.set_paused(PauseReason::StorageBackpressure));
+        assert!(bp.is_paused());
+
+        // First resume returns true (state changed)
+        assert!(bp.set_resumed());
+        assert!(!bp.is_paused());
+
+        // Second resume returns false (no change)
+        assert!(!bp.set_resumed());
+        assert!(!bp.is_paused());
+    }
+
+    #[test]
+    fn shared_backpressure_concurrent_access() {
+        let bp = Arc::new(SharedBackpressure::new());
+        let mut handles = vec![];
+
+        for _ in 0..4 {
+            let bp_clone = Arc::clone(&bp);
+            handles.push(thread::spawn(move || {
+                for _ in 0..100 {
+                    bp_clone.set_paused(PauseReason::StorageBackpressure);
+                    let _ = bp_clone.is_paused();
+                    bp_clone.set_resumed();
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Final state consistent after all threads complete
+        assert!(!bp.is_paused());
     }
 }
