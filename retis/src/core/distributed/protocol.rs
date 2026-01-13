@@ -121,11 +121,11 @@ pub struct BatchAck {
 /// Status of batch processing.
 #[derive(Encode, Decode, Debug, Clone)]
 pub enum BatchStatus {
-    /// All events accepted
+    /// All events accepted.
     Accepted,
-    /// Some events had errors
+    /// Some events had errors.
     PartialFailure,
-    /// Batch rejected entirely
+    /// Batch rejected entirely.
     Rejected(String),
 }
 
@@ -135,15 +135,11 @@ pub enum BatchStatus {
 #[derive(Encode, Decode, Debug, Clone)]
 pub struct Pause {
     pub reason: PauseReason,
-    pub estimated_duration_ms: Option<u64>,
 }
 
 #[derive(Encode, Decode, Debug, Clone)]
 pub enum PauseReason {
-    Overloaded,
     StorageBackpressure,
-    MemoryPressure,
-    Maintenance,
 }
 
 /// Clears backpressure.
