@@ -67,6 +67,9 @@ thiserror = "2.0"
 uuid = { version = "1", features = ["v4"] }
 schemars = "0.9"
 
+# DuckDB integration (distributed tracing)
+duckdb = { version = "1.4", features = ["bundled"] }
+
 [build-dependencies]
 bindgen = "0.72"
 libbpf-cargo = "=0.26.0-beta.1"

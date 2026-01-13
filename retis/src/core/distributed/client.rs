@@ -465,8 +465,8 @@ impl CollectorWorker {
         let msg = Message::new(self.sequence, timestamp, payload);
         self.sequence += 1;
 
-        let encoded =
-            bincode::encode_to_vec(&msg, bincode::config::standard()).context("encoding message")?;
+        let encoded = bincode::encode_to_vec(&msg, bincode::config::standard())
+            .context("encoding message")?;
 
         let len = encoded.len() as u32;
         stream.write_all(&len.to_le_bytes())?;
@@ -493,9 +493,8 @@ impl CollectorWorker {
         let mut buf = vec![0u8; len];
         stream.read_exact(&mut buf)?;
 
-        let (msg, _): (Message, _) =
-            bincode::decode_from_slice(&buf, bincode::config::standard())
-                .context("decoding message")?;
+        let (msg, _): (Message, _) = bincode::decode_from_slice(&buf, bincode::config::standard())
+            .context("decoding message")?;
 
         Ok(msg)
     }
@@ -535,9 +534,7 @@ impl DistributedCollector {
     }
 
     pub fn process_one(&mut self, event: &Event) -> Result<()> {
-        self.stats
-            .events_captured
-            .fetch_add(1, Ordering::Relaxed);
+        self.stats.events_captured.fetch_add(1, Ordering::Relaxed);
 
         let distributed = match &event.distributed {
             Some(meta) => WireDistributedMetadata::from_metadata(meta),
@@ -557,9 +554,7 @@ impl DistributedCollector {
         match self.sender.try_send(CollectorCommand::Event(wire_event)) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => {
-                self.stats
-                    .events_dropped
-                    .fetch_add(1, Ordering::Relaxed);
+                self.stats.events_dropped.fetch_add(1, Ordering::Relaxed);
                 debug!("Channel full, dropping event");
                 Ok(())
             }
