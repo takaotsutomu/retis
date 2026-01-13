@@ -68,6 +68,11 @@ thiserror = "2.0"
 uuid = { version = "1", features = ["v4"] }
 schemars = "0.9"
 
+# ClickHouse integration (distributed tracing)
+crossbeam-channel = "0.5"
+ureq = { version = "3", features = ["json"] }
+urlencoding = "2"
+
 [build-dependencies]
 bindgen = "0.72"
 libbpf-cargo = "=0.26.0-beta.1"
