@@ -204,7 +204,10 @@ impl Collectors {
             let collector =
                 DistributedCollector::start(config, self.node_identity.as_ref().unwrap().clone());
 
-            info!("Distributed collector initialized, will connect to {} on first event", addr);
+            info!(
+                "Distributed collector initialized, will connect to {} on first event",
+                addr
+            );
             self.distributed_collector = Some(collector);
         } else {
             warn!("--aggregator not specified, events will not be sent to aggregator");

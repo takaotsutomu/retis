@@ -78,9 +78,9 @@ pub(crate) struct AggregatorStatsSnapshot {
 
 /// Trait for handling received events.
 ///
-/// Implementations can store events to ClickHouse, files, or other backends.
+/// Implementations can store events to DuckDB, files, or other backends.
 pub(crate) trait EventSink: Send {
-    /// Process a batch of events. Returns the status to send back to the collector.
+    /// Process a batch of events.
     fn process_batch(&mut self, session: &SessionInfo, batch: &EventBatch) -> Result<BatchStatus>;
 
     /// Flush any buffered data to storage.
@@ -280,7 +280,6 @@ impl ConnectionHandler {
     }
 
     fn handle_event_batch(&mut self, batch: EventBatch) -> Result<()> {
-        // Reject batches from unregistered connections.
         if !self.registered {
             warn!(
                 "Session {} not registered, rejecting batch",
