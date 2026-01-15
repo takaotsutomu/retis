@@ -23,6 +23,7 @@ default = ["python"]
 python = ["retis-derive/python", "events/python-embed"]
 test_bindgen_layout = []
 test_cap_bpf = []
+test_clickhouse = []
 benchmark = []
 debug = ["dep:rbpf"]
 
