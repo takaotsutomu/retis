@@ -1,5 +1,6 @@
 use anyhow::Result;
 
+mod aggregate;
 mod bindings;
 mod cli;
 mod collect;

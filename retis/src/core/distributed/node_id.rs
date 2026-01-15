@@ -95,6 +95,15 @@ impl NodeIdentity {
     pub fn hostname(&self) -> &str {
         &self.hostname
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(node_id: [u8; 16], name: &str) -> Self {
+        Self {
+            node_id: Uuid::from_bytes(node_id),
+            name: Some(name.to_string()),
+            hostname: "test-host".to_string(),
+        }
+    }
 }
 
 #[cfg(test)]

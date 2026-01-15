@@ -220,7 +220,7 @@ impl ClickHouseWriter {
                     }
                 }
                 Ok(WriterCommand::Shutdown) => {
-                    debug!("Writer {} received shutdown", self.id);
+                    debug!("Writer {}: received shutdown", self.id);
                     break;
                 }
                 Err(RecvTimeoutError::Timeout) => {
@@ -229,7 +229,7 @@ impl ClickHouseWriter {
                     }
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    debug!("Writer {} channel disconnected", self.id);
+                    debug!("Writer {}: channel disconnected", self.id);
                     break;
                 }
             }
@@ -266,10 +266,9 @@ impl ClickHouseWriter {
                 self.stats.batches_sent.fetch_add(1, Ordering::Relaxed);
                 self.connected = true;
                 self.retry_delay = Duration::from_secs(1);
-                debug!("Writer {} inserted {} events", self.id, count);
             }
             Err(e) => {
-                warn!("Writer {} insert failed: {}", self.id, e);
+                error!("Writer {}: insert failed: {}", self.id, e);
                 self.stats.insert_errors.fetch_add(1, Ordering::Relaxed);
                 self.stats
                     .events_failed
@@ -300,13 +299,15 @@ impl ClickHouseWriter {
             .join("\n");
 
         let mut request = self.agent.post(&url);
+        request = request.header("Content-Type", "text/tab-separated-values");
 
         if let Some((user, password)) = &self.auth_header {
             request = request.header("X-ClickHouse-User", user);
             request = request.header("X-ClickHouse-Key", password);
         }
 
-        let mut response = request.send(&body).context("sending to ClickHouse")?;
+        let body_bytes = body.as_bytes().to_vec();
+        let mut response = request.send(body_bytes).context("sending to ClickHouse")?;
 
         if response.status().as_u16() != 200 {
             let err_body = response.body_mut().read_to_string().unwrap_or_default();
@@ -484,7 +485,7 @@ impl EventSink for ClickHouseEventSink {
             ) {
                 Ok(row) => rows.push(row),
                 Err(e) => {
-                    debug!("Failed to parse event: {}", e);
+                    debug!("EventRow conversion failed: {}", e);
                     self.stats.events_failed.fetch_add(1, Ordering::Relaxed);
                 }
             }
