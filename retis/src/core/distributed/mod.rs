@@ -2,6 +2,8 @@ pub(crate) mod aggregator;
 pub(crate) mod client;
 pub(crate) mod duckdb;
 pub(crate) mod flow_id;
+#[allow(dead_code)]
+pub(crate) mod journey;
 pub(crate) mod node_id;
 pub(crate) mod ntp;
 pub(crate) mod protocol;
