@@ -57,6 +57,7 @@ plain = "0.2"
 rbpf = {version = "0.3", optional = true}
 regex = "1.7"
 retis-derive = {version = "1.5", path = "../retis-derive"}
+retis-pnet = {version = "1.5", path = "../retis-pnet"}
 serde = {version = "1.0", features = ["derive"]}
 serde_json = "1.0"
 serde_with = "3.0"
