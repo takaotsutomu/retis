@@ -1,6 +1,7 @@
 pub(crate) mod aggregator;
 pub(crate) mod clickhouse;
 pub(crate) mod client;
+pub(crate) mod flow_id;
 #[allow(dead_code)]
 pub(crate) mod node_id;
 #[allow(dead_code)]

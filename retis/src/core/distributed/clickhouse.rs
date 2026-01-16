@@ -15,6 +15,7 @@ use log::{debug, error, info, warn};
 use super::aggregator::{
     BackpressureChange, EventSink, ProcessResult, SessionInfo, SharedBackpressure,
 };
+use super::flow_id::FlowId;
 use super::protocol::{BatchStatus, EventBatch, PauseReason, WireDistributedMetadata};
 use crate::events::Event;
 
@@ -104,6 +105,13 @@ impl EventRow {
             .map(|t| format!("{:x}", t.tracking_id()))
             .unwrap_or_default();
 
+        let flow_id = event
+            .packet
+            .as_ref()
+            .and_then(|p| FlowId::from_bytes(&p.data.0))
+            .map(|f| f.to_string())
+            .unwrap_or_default();
+
         let (event_type, probe_point) = event
             .kernel
             .as_ref()
@@ -122,7 +130,7 @@ impl EventRow {
             node_name: session.node_name.clone(),
             hostname: session.hostname.clone(),
             tracking_id,
-            flow_id: String::new(), // TODO: Extract from packet section in M3
+            flow_id,
             event_type,
             probe_point,
             event_json: event_json.to_string(),
