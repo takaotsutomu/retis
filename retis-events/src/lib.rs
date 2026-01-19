@@ -25,6 +25,8 @@ pub mod ct;
 pub use ct::*;
 pub mod dev;
 pub use dev::*;
+pub mod distributed;
+pub use distributed::*;
 pub mod kernel;
 pub use kernel::*;
 pub mod nft;
