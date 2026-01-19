@@ -9,6 +9,8 @@ pub(crate) mod node_id;
 #[allow(dead_code)]
 pub(crate) mod ntp;
 pub(crate) mod protocol;
+#[allow(dead_code)]
+pub(crate) mod query;
 
 #[cfg(test)]
 mod tests;
@@ -23,3 +25,5 @@ pub(crate) use journey::{CausalityViolation, Journey, JourneyHop};
 pub(crate) use node_id::NodeIdentity;
 #[allow(unused_imports)]
 pub(crate) use ntp::{NtpMonitor, NtpStatus, NtpSyncStatus};
+#[allow(unused_imports)]
+pub(crate) use query::{ClickHouseQueryClient, EventQueryFilter, EventQueryRow, QueryConfig};
