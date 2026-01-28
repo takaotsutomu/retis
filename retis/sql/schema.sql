@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS {database}.{table} (
 
     -- Correlation fields
     tracking_id String,
+    correlation_id String,  -- Deterministic ID for cross-node correlation
     flow_id String,
 
     -- Event metadata
@@ -40,6 +41,8 @@ SETTINGS index_granularity = 8192;
 -- Bloom filter indexes for correlation queries
 ALTER TABLE {database}.{table}
     ADD INDEX IF NOT EXISTS idx_tracking_id tracking_id TYPE bloom_filter GRANULARITY 4;
+ALTER TABLE {database}.{table}
+    ADD INDEX IF NOT EXISTS idx_correlation_id correlation_id TYPE bloom_filter GRANULARITY 4;
 ALTER TABLE {database}.{table}
     ADD INDEX IF NOT EXISTS idx_flow_id flow_id TYPE bloom_filter GRANULARITY 4;
 
