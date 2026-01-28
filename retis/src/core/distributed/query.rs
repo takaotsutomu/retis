@@ -83,8 +83,8 @@ pub(crate) struct EventQueryRow {
     pub session_id: u64,
     pub node_name: String,
     pub hostname: String,
-    /// Hex string
     pub tracking_id: String,
+    pub correlation_id: String,
     pub flow_id: String,
     pub event_type: String,
     pub probe_point: String,
@@ -113,6 +113,7 @@ impl EventQueryRow {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct EventQueryFilter {
     pub tracking_id: Option<String>,
+    pub correlation_id: Option<String>,
     pub flow_id: Option<String>,
     /// Matches both directions of the flow
     pub canonical_flow_id: Option<String>,
@@ -131,6 +132,14 @@ impl EventQueryFilter {
     pub fn by_tracking_id(tracking_id: &str) -> Self {
         Self {
             tracking_id: Some(tracking_id.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// Filter by correlation ID for cross-node correlation.
+    pub fn by_correlation_id(correlation_id: &str) -> Self {
+        Self {
+            correlation_id: Some(correlation_id.to_string()),
             ..Default::default()
         }
     }
@@ -170,6 +179,7 @@ impl EventQueryFilter {
 
     pub fn is_empty(&self) -> bool {
         self.tracking_id.is_none()
+            && self.correlation_id.is_none()
             && self.flow_id.is_none()
             && self.canonical_flow_id.is_none()
             && self.node_id.is_none()
@@ -216,6 +226,10 @@ impl ClickHouseQueryClient {
 
     pub fn query_by_tracking_id(&self, tracking_id: &str) -> Result<Vec<EventQueryRow>> {
         self.query_events(&EventQueryFilter::by_tracking_id(tracking_id))
+    }
+
+    pub fn query_by_correlation_id(&self, correlation_id: &str) -> Result<Vec<EventQueryRow>> {
+        self.query_events(&EventQueryFilter::by_correlation_id(correlation_id))
     }
 
     pub fn query_by_flow_id(&self, flow_id: &str) -> Result<Vec<EventQueryRow>> {
@@ -271,6 +285,10 @@ impl ClickHouseQueryClient {
 
         if let Some(ref tracking_id) = filter.tracking_id {
             conditions.push(format!("tracking_id = '{}'", escape_sql(tracking_id)));
+        }
+
+        if let Some(ref correlation_id) = filter.correlation_id {
+            conditions.push(format!("correlation_id = '{}'", escape_sql(correlation_id)));
         }
 
         if let Some(ref flow_id) = filter.flow_id {
@@ -332,7 +350,7 @@ impl ClickHouseQueryClient {
             "SELECT \
                 event_id, node_id, epoch_ns, ntp_offset_ns, \
                 sync_status, session_id, node_name, hostname, tracking_id, \
-                flow_id, event_type, probe_point, event_json \
+                correlation_id, flow_id, event_type, probe_point, event_json \
             FROM {}.{} \
             {} \
             ORDER BY epoch_ns ASC \

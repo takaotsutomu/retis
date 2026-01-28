@@ -84,6 +84,7 @@ struct EventRow {
     node_name: String,
     hostname: String,
     tracking_id: String,
+    correlation_id: String,
     flow_id: String,
     event_type: String,
     probe_point: String,
@@ -102,6 +103,13 @@ impl EventRow {
             .skb_tracking
             .as_ref()
             .map(|t| format!("{:x}", t.tracking_id()))
+            .unwrap_or_default();
+
+        let correlation_id = event
+            .skb_tracking
+            .as_ref()
+            .and_then(|t| t.correlation_id())
+            .map(|h| format!("{:016x}", h))
             .unwrap_or_default();
 
         let flow_id = event
@@ -128,6 +136,7 @@ impl EventRow {
             node_name: session.node_name.clone(),
             hostname: session.hostname.clone(),
             tracking_id,
+            correlation_id,
             flow_id,
             event_type,
             probe_point,
@@ -137,7 +146,7 @@ impl EventRow {
 
     fn to_tsv(&self) -> String {
         format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             self.node_id,
             self.epoch_ns,
             self.ntp_offset_ns,
@@ -146,6 +155,7 @@ impl EventRow {
             escape_tsv(&self.node_name),
             escape_tsv(&self.hostname),
             escape_tsv(&self.tracking_id),
+            escape_tsv(&self.correlation_id),
             escape_tsv(&self.flow_id),
             escape_tsv(&self.event_type),
             escape_tsv(&self.probe_point),
@@ -290,7 +300,7 @@ impl ClickHouseWriter {
 
     fn do_insert(&self, rows: &[EventRow]) -> Result<()> {
         let columns = "node_id, epoch_ns, ntp_offset_ns, sync_status, \
-                       session_id, node_name, hostname, tracking_id, flow_id, \
+                       session_id, node_name, hostname, tracking_id, correlation_id, flow_id, \
                        event_type, probe_point, event_json";
 
         let query = format!(
@@ -426,6 +436,7 @@ CREATE TABLE IF NOT EXISTS {database}.{table} (
     node_name String,
     hostname String,
     tracking_id String,
+    correlation_id String,
     flow_id String,
     event_type String,
     probe_point String,

@@ -8,4 +8,5 @@ pub struct skb_tracking_event {
     pub orig_head: u64_,
     pub timestamp: u64_,
     pub skb: u64_,
+    pub correlation_id: u64_,
 }
