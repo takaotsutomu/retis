@@ -423,3 +423,64 @@ def kernel_version_lt(other):
         return int(release[1]) < int(other[1])
     if release[2] != other[2]:
         return int(release[2]) < int(other[2])
+
+
+class Aggregator:
+    """Wrapper around retis aggregate command for distributed tracing tests."""
+
+    def __init__(self, listen="127.0.0.1:9415", no_clickhouse=True, target="debug"):
+        self.binary = join(
+            dirname(dirname(abspath(__file__))), "target", target, "retis"
+        )
+        self.listen = listen
+        self.no_clickhouse = no_clickhouse
+        self.proc = None
+        self.target = target
+
+    def start(self):
+        """Start the aggregator and wait until it's accepting connections."""
+        cmd = [self.binary, "aggregate", "--listen", self.listen]
+        if self.no_clickhouse:
+            cmd.append("--no-clickhouse")
+        print(f"running command: {cmd}")
+        self.proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        self._wait_for_ready()
+
+    def _wait_for_ready(self, timeout=10.0):
+        """Wait until the aggregator is accepting TCP connections."""
+        import socket
+
+        host, port = self.listen.rsplit(":", 1)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            # Check if process died
+            if self.proc.poll() is not None:
+                _, errs = self.proc.communicate()
+                raise RuntimeError(
+                    f"Aggregator process exited unexpectedly: {errs.decode('utf8')}"
+                )
+            try:
+                with socket.create_connection((host, int(port)), timeout=0.5):
+                    return  # Server is accepting connections
+            except (ConnectionRefusedError, socket.timeout, OSError):
+                time.sleep(0.1)
+        raise RuntimeError(f"Aggregator failed to start within {timeout}s")
+
+    def stop(self):
+        """Stop the aggregator."""
+        if self.proc:
+            self.proc.send_signal(signal.SIGINT)
+            try:
+                outs, errs = self.proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                outs, errs = self.proc.communicate()
+            print(
+                "Command: '{}'. stdout {}, stderr = {}".format(
+                    self.proc.args, outs, errs
+                )
+            )
+            return (outs.decode("utf8"), errs.decode("utf8"))
+        return ("", "")

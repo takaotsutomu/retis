@@ -45,6 +45,11 @@ impl Running {
     pub(crate) fn terminate(&self) {
         self.0.store(true, Ordering::Relaxed);
     }
+
+    /// Returns the inner shutdown flag for sharing with components that need it.
+    pub(crate) fn shutdown_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.0)
+    }
 }
 
 impl Default for Running {
