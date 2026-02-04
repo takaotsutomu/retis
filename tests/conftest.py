@@ -2,7 +2,7 @@
 
 import pytest
 
-from testlib import NetworkNamespaces, OVS
+from testlib import Aggregator, NetworkNamespaces, OVS
 from pyroute2 import IPRoute
 
 
@@ -13,6 +13,15 @@ def netns():
     nsman = NetworkNamespaces()
     yield nsman
     nsman.clear()
+
+
+@pytest.fixture
+def aggregator():
+    """Fixture that starts an aggregator and stops it after execution."""
+    agg = Aggregator()
+    agg.start()
+    yield agg
+    agg.stop()
 
 
 @pytest.fixture

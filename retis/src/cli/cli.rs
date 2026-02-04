@@ -18,6 +18,7 @@ use log::{debug, LevelFilter};
 #[cfg(feature = "benchmark")]
 use crate::benchmark::cli::Benchmark;
 use crate::{
+    aggregate::Aggregate,
     collect::cli::Collect,
     generate::Complete,
     helpers::{
@@ -196,6 +197,7 @@ impl RetisCli {
         // Note the logger has not been initialized yet. Subcommand creation should
         // be as simple as possible and all logging should be delayed to
         // update_from_arg_matches.
+        cli.add_subcommand(Box::new(Aggregate::new()?))?;
         cli.add_subcommand(Box::new(Collect::new()?))?;
         cli.add_subcommand(Box::new(Print::new()?))?;
         cli.add_subcommand(Box::new(Sort::new()?))?;
