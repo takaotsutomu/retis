@@ -426,14 +426,21 @@ pub(crate) struct TraceAggregator {
     sessions: Arc<RwLock<HashMap<u64, SessionInfo>>>,
     stats: Arc<AggregatorStats>,
     next_session_id: AtomicU64,
-    running: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
     event_sink: Arc<Mutex<Box<dyn EventSink>>>,
     handler_threads: Vec<JoinHandle<()>>,
 }
 
 impl TraceAggregator {
     /// Creates a new aggregator bound to the configured address.
-    pub fn new(config: AggregatorConfig, event_sink: Box<dyn EventSink>) -> Result<Self> {
+    ///
+    /// The `shutdown` flag is checked in the accept loop - set it to `true`
+    /// to signal the aggregator to stop (e.g., from a signal handler).
+    pub fn new(
+        config: AggregatorConfig,
+        event_sink: Box<dyn EventSink>,
+        shutdown: Arc<AtomicBool>,
+    ) -> Result<Self> {
         let listener = TcpListener::bind(&config.listen_addr)
             .with_context(|| format!("binding to {}", config.listen_addr))?;
 
@@ -449,19 +456,17 @@ impl TraceAggregator {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             stats: Arc::new(AggregatorStats::new()),
             next_session_id: AtomicU64::new(1),
-            running: Arc::new(AtomicBool::new(false)),
+            shutdown,
             event_sink: Arc::new(Mutex::new(event_sink)),
             handler_threads: Vec::new(),
         })
     }
 
-    /// Runs the aggregator accept loop. Blocks until `shutdown()` is called.
+    /// Runs the aggregator accept loop. Blocks until `shutdown` flag is set to `true`.
     pub fn run(&mut self) -> Result<()> {
-        self.running.store(true, Ordering::SeqCst);
-
         info!("Aggregator started");
 
-        while self.running.load(Ordering::SeqCst) {
+        while !self.shutdown.load(Ordering::SeqCst) {
             match self.listener.accept() {
                 Ok((stream, addr)) => {
                     let active = self.stats.active_connections.load(Ordering::Relaxed);
@@ -533,11 +538,6 @@ impl TraceAggregator {
         Ok(())
     }
 
-    /// Signals the aggregator to stop accepting new connections.
-    pub fn shutdown(&self) {
-        self.running.store(false, Ordering::SeqCst);
-    }
-
     /// Returns a snapshot of the current statistics.
     #[allow(dead_code)]
     pub fn stats(&self) -> AggregatorStatsSnapshot {
@@ -551,6 +551,14 @@ impl TraceAggregator {
             .read()
             .expect("sessions lock should not be poisoned")
             .len()
+    }
+
+    /// Returns the local address the aggregator is bound to.
+    ///
+    /// Useful when binding to port 0 (OS-assigned) to discover the actual port.
+    #[allow(dead_code)]
+    pub fn local_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+        self.listener.local_addr()
     }
 }
 
@@ -599,11 +607,12 @@ mod tests {
     fn session_registration_and_ack() {
         let config = create_test_config();
         let sink = Box::new(LoggingEventSink::new());
-        let mut aggregator = TraceAggregator::new(config, sink).unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_clone = Arc::clone(&shutdown);
 
+        let mut aggregator = TraceAggregator::new(config, sink, shutdown).unwrap();
         let addr = aggregator.listener.local_addr().unwrap();
 
-        let running = Arc::clone(&aggregator.running);
         let handle = thread::spawn(move || {
             aggregator.run().unwrap();
         });
@@ -653,9 +662,8 @@ mod tests {
             _ => panic!("Expected RegisterAck"),
         }
 
-        running.store(false, Ordering::SeqCst);
+        shutdown_clone.store(true, Ordering::SeqCst);
         drop(client);
         handle.join().unwrap();
     }
-
 }
