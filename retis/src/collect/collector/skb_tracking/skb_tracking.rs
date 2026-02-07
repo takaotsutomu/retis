@@ -51,6 +51,7 @@ impl RawEventSectionFactory for SkbTrackingEventFactory {
             orig_head: raw.orig_head,
             timestamp: raw.timestamp,
             skb: raw.skb,
+            correlation_id: raw.correlation_id,
         };
 
         event.skb_tracking = Some(track);

@@ -8,12 +8,21 @@ use std::{
 use super::*;
 use crate::{event_section, Formatter};
 
+/// Helper for serde skip_serializing_if to skip fields with value 0.
+fn is_zero(val: &u64) -> bool {
+    *val == 0
+}
+
 /// Tracking section.
 /// For more information of how the tracking logic is designed and how it can be
 /// used, please see `collect::collector::skb_tracking` documentation.
 ///
 /// Tl;dr; the tracking unique id is `(timestamp, orig_head)` and `skb` can be
 /// used to distinguished between clones.
+///
+/// For cross-node correlation, use [`correlation_id()`](Self::correlation_id)
+/// instead of `tracking_id`. See `correlation_id.h` for supported protocols
+/// and hash inputs.
 #[event_section]
 #[derive(Default, Copy, PartialEq)]
 #[repr(C)]
@@ -26,6 +35,10 @@ pub struct SkbTrackingEvent {
     pub timestamp: u64,
     /// Socket buffer. (`skb`) address of the current packet.
     pub skb: u64,
+    /// Deterministic correlation ID for cross-node correlation.
+    /// 0 for unsupported protocols. See `correlation_id.h` for details.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub correlation_id: u64,
 }
 
 #[allow(dead_code)]
@@ -45,6 +58,12 @@ impl SkbTrackingEvent {
     /// Check if two tracking event sections are from the exact same skb.
     pub fn strict_match(&self, other: &SkbTrackingEvent) -> bool {
         self.r#match(other) && self.skb == other.skb
+    }
+
+    /// Returns `Some(id)` when cross-node correlation is available,
+    /// `None` for unsupported protocols (fall back to `tracking_id()`).
+    pub fn correlation_id(&self) -> Option<u64> {
+        (self.correlation_id != 0).then_some(self.correlation_id)
     }
 }
 
