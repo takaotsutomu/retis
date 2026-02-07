@@ -3,17 +3,20 @@
 
 #include <common.h>
 #include <skb_tracking.h>
+#include <correlation_id.h>
 
 struct skb_tracking_event {
 	u64 orig_head;
 	u64 timestamp;
 	u64 skb;
+	u64 correlation_id;
 } __binding;
 
 DEFINE_HOOK(F_AND, RETIS_ALL_FILTERS,
 	struct skb_tracking_event *e;
 	struct tracking_info *ti;
 	struct sk_buff *skb;
+	unsigned char *head;
 
 	skb = retis_get_sk_buff(ctx);
 	if (!skb)
@@ -30,6 +33,9 @@ DEFINE_HOOK(F_AND, RETIS_ALL_FILTERS,
 	e->orig_head = ti->orig_head;
 	e->timestamp = ti->timestamp;
 	e->skb = (u64)skb;
+
+	head = BPF_CORE_READ(skb, head);
+	e->correlation_id = compute_correlation_id(skb, head);
 
 	return 0;
 )
