@@ -202,6 +202,7 @@ mod tests {
 
     static EVENTS: [(&str, TrackingInfo); 1] = [
         // Upcall event
+        // Note: correlation_id is skipped from serialization when it's 0
         (
             r#"{"idx":9,"skb":{"orig_head":18446616575029637120,"skb":18446616575340381184,"timestamp":689436955471671}}"#,
             TrackingInfo {
@@ -209,6 +210,7 @@ mod tests {
                     orig_head: 18446616575029637120,
                     timestamp: 689436955471671,
                     skb: 18446616575340381184,
+                    correlation_id: 0,
                 },
                 idx: 9,
             },

@@ -4,6 +4,8 @@ pub(crate) mod duckdb;
 pub(crate) mod flow_id;
 #[allow(dead_code)]
 pub(crate) mod journey;
+#[allow(dead_code)]
+pub(crate) mod journey_builder;
 pub(crate) mod node_id;
 pub(crate) mod ntp;
 pub(crate) mod protocol;
