@@ -153,6 +153,36 @@ Notes:
     #[arg(long, help = "Format used when printing an event.")]
     #[clap(value_enum, default_value_t=CliDisplayFormat::MultiLine)]
     pub(super) format: CliDisplayFormat,
+    #[arg(
+        long,
+        help = "Enable distributed tracing mode for multi-node packet correlation.
+
+When enabled, events are enriched with:
+- Epoch timestamps (for cross-node comparison)
+- Node identity (UUID)
+- NTP synchronization status (for uncertainty bounds)
+
+Use with --aggregator to send events to a central aggregator."
+    )]
+    pub(super) distributed: bool,
+    #[arg(
+        long,
+        requires = "distributed",
+        help = "Address of the distributed tracing aggregator (host:port).
+
+Requires --distributed. Events will be sent to this aggregator
+for cross-node correlation and storage."
+    )]
+    pub(super) aggregator: Option<String>,
+
+    #[arg(
+        long,
+        requires = "distributed",
+        help = "Friendly name for this node in distributed tracing output.
+
+If not set, the system hostname is used."
+    )]
+    pub(super) node_name: Option<String>,
 
     /// Embed below all the per-collector arguments.
     #[command(flatten)]
