@@ -65,6 +65,9 @@ pub(crate) struct EventQueryRow {
     pub flow_id: String,
     pub event_type: String,
     pub probe_point: String,
+    /// Resolved at ingestion time; `None` if NULL (no OVS output or
+    /// unresolved tunnel).
+    pub next_hop_node_id: Option<String>,
     pub event_json: String,
 }
 
@@ -307,7 +310,8 @@ impl DuckDbQueryClient {
             "SELECT \
                 event_id, node_id, epoch_ns, ntp_offset_ns, \
                 sync_status, session_id, node_name, hostname, tracking_id, \
-                correlation_id, flow_id, event_type, probe_point, event_json \
+                correlation_id, flow_id, event_type, probe_point, \
+                next_hop_node_id, event_json \
             FROM retis_events \
             {} \
             ORDER BY epoch_ns ASC \
@@ -340,7 +344,8 @@ impl DuckDbQueryClient {
                     flow_id: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
                     event_type: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
                     probe_point: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
-                    event_json: row.get(13)?,
+                    next_hop_node_id: row.get::<_, Option<String>>(13)?,
+                    event_json: row.get(14)?,
                 })
             })
             .context("executing query")?;
@@ -544,7 +549,7 @@ mod tests {
                 ntp_offset_ns BIGINT, sync_status TINYINT, session_id UBIGINT,
                 node_name VARCHAR, hostname VARCHAR, tracking_id VARCHAR,
                 correlation_id VARCHAR, flow_id VARCHAR, event_type VARCHAR,
-                probe_point VARCHAR, event_json VARCHAR
+                probe_point VARCHAR, next_hop_node_id VARCHAR, event_json VARCHAR
             );
             "#,
         )
@@ -604,7 +609,7 @@ mod tests {
                 ntp_offset_ns BIGINT, sync_status TINYINT, session_id UBIGINT,
                 node_name VARCHAR, hostname VARCHAR, tracking_id VARCHAR,
                 correlation_id VARCHAR, flow_id VARCHAR, event_type VARCHAR,
-                probe_point VARCHAR, event_json VARCHAR
+                probe_point VARCHAR, next_hop_node_id VARCHAR, event_json VARCHAR
             );
             "#,
         )

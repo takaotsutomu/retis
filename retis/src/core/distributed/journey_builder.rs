@@ -6,8 +6,10 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
+use log::warn;
 use uuid::Uuid;
 
+use super::causality::{enforce_causality, HopEdge};
 use super::journey::{Journey, JourneyHop};
 use super::query::{DuckDbQueryClient, EventQueryFilter, EventQueryRow};
 
@@ -42,10 +44,6 @@ impl<'a> JourneyBuilder<'a> {
             .query_by_tracking_id(tracking_id)
             .context("querying events by tracking_id")?;
 
-        if rows.is_empty() {
-            return Ok(None);
-        }
-
         self.build_single_journey(tracking_id.to_string(), rows)
     }
 
@@ -54,10 +52,6 @@ impl<'a> JourneyBuilder<'a> {
             .client
             .query_by_correlation_id(correlation_id)
             .context("querying events by correlation_id")?;
-
-        if rows.is_empty() {
-            return Ok(None);
-        }
 
         self.build_single_journey(correlation_id.to_string(), rows)
     }
@@ -77,11 +71,6 @@ impl<'a> JourneyBuilder<'a> {
             .query_events(&query_filter)
             .context("querying events for journeys")?;
 
-        if rows.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Group events based on mode
         let groups: HashMap<String, Vec<EventQueryRow>> = match filter.mode {
             JourneyMode::SingleNode => group_by_tracking_id(rows),
             JourneyMode::CrossNode => group_by_correlation_id(rows),
@@ -104,13 +93,18 @@ impl<'a> JourneyBuilder<'a> {
         journey_key: String,
         rows: Vec<EventQueryRow>,
     ) -> Result<Option<Journey>> {
-        let mut journey = Journey::new(journey_key);
-
-        for row in rows {
-            let hop = row_to_hop(&row)?;
-            journey.hops.push(hop);
+        if rows.is_empty() {
+            return Ok(None);
         }
 
+        let mut journey = Journey::new(journey_key);
+        let (hops, edges) = build_hops_and_edges(rows)?;
+        journey.hops = hops;
+
+        // Edge deduplication is intentionally omitted:
+        // `extract_forwarding_chains` handles duplicates naturally via
+        // its group-indexed map.
+        enforce_causality(&mut journey, &edges);
         journey.recompute_timing();
 
         Ok(Some(journey))
@@ -129,6 +123,40 @@ fn row_to_hop(row: &EventQueryRow) -> Result<JourneyHop> {
         event_type: row.event_type.clone(),
         flow_id: row.flow_id.clone(),
     })
+}
+
+/// Converts query rows into journey hops and topology edges.
+///
+/// `node_id` is parsed with hard errors because it is our own node
+/// identity and must always be valid. `next_hop_node_id` parse
+/// failures are logged and skipped, since this is external mapping data
+/// that may legitimately be absent or malformed.
+fn build_hops_and_edges(rows: Vec<EventQueryRow>) -> Result<(Vec<JourneyHop>, Vec<HopEdge>)> {
+    let mut hops = Vec::with_capacity(rows.len());
+    let mut edges = Vec::new();
+
+    for row in rows {
+        let hop = row_to_hop(&row)?;
+
+        if let Some(ref next_hop) = row.next_hop_node_id {
+            match Uuid::parse_str(next_hop) {
+                Ok(to) => {
+                    edges.push(HopEdge {
+                        from_node: hop.node_id,
+                        from_tracking_id: row.tracking_id.clone(),
+                        to_node: to,
+                    });
+                }
+                Err(e) => {
+                    warn!("Skipping malformed next_hop_node_id {:?}: {}", next_hop, e);
+                }
+            }
+        }
+
+        hops.push(hop);
+    }
+
+    Ok((hops, edges))
 }
 
 fn group_by_tracking_id(rows: Vec<EventQueryRow>) -> HashMap<String, Vec<EventQueryRow>> {
@@ -161,6 +189,9 @@ fn group_by_correlation_id(rows: Vec<EventQueryRow>) -> HashMap<String, Vec<Even
 mod tests {
     use super::*;
 
+    const NODE_A: &str = "00000000-0000-0000-0000-00000000000a";
+    const NODE_B: &str = "00000000-0000-0000-0000-00000000000b";
+
     fn create_row_with_correlation(
         event_id: &str,
         node_id: &str,
@@ -183,6 +214,7 @@ mod tests {
             flow_id: flow_id.to_string(),
             event_type: "kprobe".to_string(),
             probe_point: "kprobe:tcp_sendmsg".to_string(),
+            next_hop_node_id: None,
             event_json: "{}".to_string(),
         }
     }
@@ -223,5 +255,66 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups.get("corr-x").map(|v| v.len()), Some(2));
         assert!(groups.get("").is_none());
+    }
+
+    #[test]
+    fn build_hops_and_edges_correctness() {
+        // Rows with next_hop_node_id produce correct edges.
+        let mut row_a = create_row_with_correlation(
+            "00000000-0000-0000-0000-000000000001",
+            NODE_A,
+            1000,
+            "track-a",
+            "corr-x",
+            "tcp:1.2.3.4:80->5.6.7.8:443",
+        );
+        row_a.next_hop_node_id = Some(NODE_B.to_string());
+
+        let row_b = create_row_with_correlation(
+            "00000000-0000-0000-0000-000000000002",
+            NODE_B,
+            2000,
+            "track-a",
+            "corr-x",
+            "tcp:1.2.3.4:80->5.6.7.8:443",
+        );
+
+        let (hops, edges) = build_hops_and_edges(vec![row_a, row_b]).unwrap();
+        assert_eq!(hops.len(), 2);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].from_node, Uuid::parse_str(NODE_A).unwrap());
+        assert_eq!(edges[0].to_node, Uuid::parse_str(NODE_B).unwrap());
+
+        // Self-edges pass through unfiltered;
+        // `extract_forwarding_chains` handles them naturally.
+        let mut self_edge_row = create_row_with_correlation(
+            "00000000-0000-0000-0000-000000000003",
+            NODE_A,
+            3000,
+            "track-a",
+            "corr-x",
+            "tcp:1.2.3.4:80->5.6.7.8:443",
+        );
+        self_edge_row.next_hop_node_id = Some(NODE_A.to_string());
+
+        let (hops, edges) = build_hops_and_edges(vec![self_edge_row]).unwrap();
+        assert_eq!(hops.len(), 1);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].from_node, edges[0].to_node);
+
+        // Malformed next_hop_node_id is skipped without error.
+        let mut bad_hop_row = create_row_with_correlation(
+            "00000000-0000-0000-0000-000000000005",
+            NODE_A,
+            5000,
+            "track-a",
+            "corr-x",
+            "tcp:1.2.3.4:80->5.6.7.8:443",
+        );
+        bad_hop_row.next_hop_node_id = Some("not-a-uuid".to_string());
+
+        let (hops, edges) = build_hops_and_edges(vec![bad_hop_row]).unwrap();
+        assert_eq!(hops.len(), 1);
+        assert!(edges.is_empty());
     }
 }
