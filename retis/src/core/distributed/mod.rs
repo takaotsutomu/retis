@@ -6,6 +6,7 @@ pub(crate) mod flow_id;
 pub(crate) mod journey;
 #[allow(dead_code)]
 pub(crate) mod journey_builder;
+pub(crate) mod mapping_store;
 pub(crate) mod node_id;
 pub(crate) mod node_mapping;
 pub(crate) mod ntp;
@@ -19,5 +20,6 @@ mod tests;
 pub(crate) use aggregator::{AggregatorConfig, EventSink, LoggingEventSink, TraceAggregator};
 pub(crate) use client::{DistributedCollector, DistributedCollectorConfig};
 pub(crate) use duckdb::{DuckDbConfig, DuckDbEventSink};
+pub(crate) use mapping_store::MappingStore;
 pub(crate) use node_id::NodeIdentity;
 pub(crate) use ntp::{NtpMonitor, NtpSyncStatus};
