@@ -5,7 +5,9 @@
 
 use bincode::{Decode, Encode};
 
-pub const PROTOCOL_VERSION: u8 = 1;
+use super::node_mapping::NodeMappingSnapshot;
+
+pub const PROTOCOL_VERSION: u8 = 2;
 pub const DEFAULT_PORT: u16 = 9415;
 pub const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024; // 16 MiB
 pub const DEFAULT_BATCH_SIZE: usize = 1000;
@@ -42,6 +44,7 @@ pub enum Payload {
     EventBatch(EventBatch),
     Heartbeat(Heartbeat),
     Shutdown(Shutdown),
+    NodeMapping(NodeMappingSnapshot),
 
     // Aggregator -> Collector
     RegisterAck(RegisterAck),

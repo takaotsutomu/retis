@@ -7,6 +7,7 @@ pub(crate) mod journey;
 #[allow(dead_code)]
 pub(crate) mod journey_builder;
 pub(crate) mod node_id;
+pub(crate) mod node_mapping;
 pub(crate) mod ntp;
 pub(crate) mod protocol;
 #[allow(dead_code)]
