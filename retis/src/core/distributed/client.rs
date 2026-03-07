@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use log::{debug, error, info, warn};
 
+use super::node_mapping::NodeMappingSnapshot;
 use super::protocol::*;
 use crate::core::distributed::NodeIdentity;
 use crate::events::Event;
@@ -48,6 +49,8 @@ pub struct DistributedCollectorConfig {
     pub buffer_size: usize,
     pub connect_timeout: Duration,
     pub io_timeout: Duration,
+    /// Configuration for background mapping discovery.
+    pub mapping_discovery: super::mapping_discovery::MappingDiscoveryConfig,
 }
 
 impl Default for DistributedCollectorConfig {
@@ -59,12 +62,14 @@ impl Default for DistributedCollectorConfig {
             buffer_size: DEFAULT_BUFFER_SIZE,
             connect_timeout: Duration::from_secs(10),
             io_timeout: Duration::from_secs(30),
+            mapping_discovery: Default::default(),
         }
     }
 }
 
-enum CollectorCommand {
+pub(crate) enum CollectorCommand {
     Event(WireEvent),
+    NodeMapping(NodeMappingSnapshot),
     Shutdown,
 }
 
@@ -125,6 +130,11 @@ struct CollectorWorker {
 
     next_reconnect_delay: Duration,
     last_connect_attempt: Option<Instant>,
+
+    /// Buffered node mapping snapshot to send on (re)connect.
+    /// This ensures the initial mapping reaches the aggregator even if the
+    /// discovery runs before the first connection is established.
+    pending_mapping: Option<NodeMappingSnapshot>,
 }
 
 impl CollectorWorker {
@@ -147,6 +157,7 @@ impl CollectorWorker {
             buffer: VecDeque::new(),
             next_reconnect_delay: INITIAL_RECONNECT_DELAY,
             last_connect_attempt: None,
+            pending_mapping: None,
         }
     }
 
@@ -157,6 +168,9 @@ impl CollectorWorker {
             match self.receiver.recv_timeout(flush_interval) {
                 Ok(CollectorCommand::Event(event)) => {
                     self.handle_event(event);
+                }
+                Ok(CollectorCommand::NodeMapping(snapshot)) => {
+                    self.handle_node_mapping(snapshot);
                 }
                 Ok(CollectorCommand::Shutdown) => {
                     self.handle_shutdown();
@@ -189,13 +203,35 @@ impl CollectorWorker {
         }
     }
 
+    fn handle_node_mapping(&mut self, snapshot: NodeMappingSnapshot) {
+        // Node mapping updates are sent immediately (not batched) since
+        // they're infrequent (~30s) and needed promptly for journey building.
+        if self.stream.is_none() {
+            // Buffer for sending once connected. Covers both the initial
+            // connection race and reconnection.
+            debug!("Not connected, buffering node mapping for later");
+            self.pending_mapping = Some(snapshot);
+            return;
+        }
+
+        if let Err(e) = self.send_message(Payload::NodeMapping(snapshot.clone())) {
+            warn!("Failed to send node mapping update: {}", e);
+            // Re-buffer so the next reconnect sends an up-to-date mapping
+            // immediately, rather than waiting for the next discovery cycle.
+            self.pending_mapping = Some(snapshot);
+            self.handle_disconnect();
+        }
+    }
+
     fn handle_shutdown(&mut self) {
         // Drain local buffer first (older events)
         while let Some(event) = self.buffer.pop_front() {
             self.pending_events.push(event);
         }
 
-        // Then drain channel (newer events)
+        // Then drain channel (newer events). Node mapping commands are
+        // intentionally dropped during shutdown, mappings are ephemeral
+        // and re-sent on next discovery cycle.
         while let Ok(cmd) = self.receiver.try_recv() {
             if let CollectorCommand::Event(event) = cmd {
                 self.pending_events.push(event);
@@ -398,6 +434,17 @@ impl CollectorWorker {
         self.register()?;
         self.reset_reconnect_backoff();
 
+        // Send any buffered node mapping immediately after connecting.
+        // This ensures the aggregator receives mapping data even if discovery
+        // ran before connection was established.
+        if let Some(snapshot) = self.pending_mapping.take() {
+            if let Err(e) = self.send_message(Payload::NodeMapping(snapshot)) {
+                warn!("Failed to send pending node mapping: {}", e);
+                // Don't fail the connection, mapping will be resent on next
+                // discovery cycle.
+            }
+        }
+
         info!(
             "Connected to aggregator (session_id: {})",
             self.session_id
@@ -458,7 +505,7 @@ impl CollectorWorker {
 
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
+            .expect("system clock is before Unix epoch")
             .as_nanos() as i64;
 
         let msg = Message::new(self.sequence, timestamp, payload);
@@ -511,12 +558,25 @@ pub struct DistributedCollector {
     stats: Arc<SharedStats>,
     sender: SyncSender<CollectorCommand>,
     thread: Option<JoinHandle<()>>,
+    mapping_discoverer: Option<super::mapping_discovery::MappingDiscoverer>,
 }
 
 impl DistributedCollector {
     pub fn start(config: DistributedCollectorConfig, identity: NodeIdentity) -> Self {
         let stats = Arc::new(SharedStats::new());
         let (sender, receiver) = mpsc::sync_channel(CHANNEL_SIZE);
+
+        let mapping_config = config.mapping_discovery.clone();
+        let mapping_discoverer = if mapping_config.enabled {
+            let node_id = identity.as_bytes();
+            Some(super::mapping_discovery::MappingDiscoverer::start(
+                node_id,
+                mapping_config,
+                sender.clone(),
+            ))
+        } else {
+            None
+        };
 
         let worker = CollectorWorker::new(config, identity, Arc::clone(&stats), receiver);
 
@@ -529,6 +589,7 @@ impl DistributedCollector {
             stats,
             sender,
             thread: Some(thread),
+            mapping_discoverer,
         }
     }
 
@@ -564,6 +625,13 @@ impl DistributedCollector {
     }
 
     pub fn shutdown(&mut self) -> Result<()> {
+        // Stop mapping discovery first so it doesn't try to send on a
+        // closing channel.
+        if let Some(ref mut discoverer) = self.mapping_discoverer {
+            discoverer.shutdown();
+        }
+        self.mapping_discoverer = None;
+
         if self.sender.send(CollectorCommand::Shutdown).is_err() {
             debug!("Worker already terminated");
         }

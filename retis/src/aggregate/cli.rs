@@ -1,6 +1,7 @@
 //! CLI subcommand for the distributed tracing aggregator.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Result;
 use clap::Parser;
@@ -8,7 +9,8 @@ use log::info;
 
 use crate::cli::{MainConfig, SubCommandParserRunner};
 use crate::core::distributed::{
-    AggregatorConfig, DuckDbConfig, DuckDbEventSink, EventSink, LoggingEventSink, TraceAggregator,
+    AggregatorConfig, DuckDbConfig, DuckDbEventSink, EventSink, LoggingEventSink, MappingStore,
+    TraceAggregator,
 };
 use crate::helpers::signals::Running;
 
@@ -52,6 +54,11 @@ impl SubCommandParserRunner for Aggregate {
         let run = Running::new();
         run.register_term_signals()?;
 
+        // Create the mapping store first so it can be shared between the
+        // aggregator (which populates it from incoming NodeMapping messages)
+        // and the DuckDB sink (which reads it during hop resolution).
+        let mapping_store = Arc::new(MappingStore::new());
+
         let sink: Box<dyn EventSink> = if self.no_storage {
             info!("Running in test mode (no storage)");
             Box::new(LoggingEventSink::new())
@@ -60,7 +67,7 @@ impl SubCommandParserRunner for Aggregate {
 
             info!("Using DuckDB database at {:?}", self.db_file);
 
-            Box::new(DuckDbEventSink::new(db_config)?)
+            Box::new(DuckDbEventSink::new(db_config, Arc::clone(&mapping_store))?)
         };
 
         let config = AggregatorConfig {
@@ -74,7 +81,8 @@ impl SubCommandParserRunner for Aggregate {
             ..Default::default()
         };
 
-        let mut aggregator = TraceAggregator::new(config, sink, run.shutdown_flag())?;
+        let mut aggregator =
+            TraceAggregator::new(config, sink, run.shutdown_flag(), mapping_store)?;
         aggregator.run()
     }
 }

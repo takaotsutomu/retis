@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use super::mapping_store::MappingStore;
 use super::protocol::*;
 use super::*;
 
@@ -78,10 +79,7 @@ fn create_test_events(count: usize, node_id: [u8; 16]) -> Vec<WireEvent> {
 }
 
 fn send_batch(stream: &mut TcpStream, sequence: u64, batch_id: u64, events: Vec<WireEvent>) {
-    let batch = EventBatch {
-        batch_id,
-        events,
-    };
+    let batch = EventBatch { batch_id, events };
     send_message(stream, sequence, Payload::EventBatch(batch));
 }
 
@@ -96,7 +94,8 @@ fn multi_collector_sends_to_aggregator() {
     let shutdown_clone = Arc::clone(&shutdown);
 
     let sink = Box::new(LoggingEventSink::new());
-    let mut aggregator = TraceAggregator::new(config, sink, shutdown).unwrap();
+    let mut aggregator =
+        TraceAggregator::new(config, sink, shutdown, Arc::new(MappingStore::new())).unwrap();
     let addr = aggregator.local_addr().unwrap();
 
     let aggregator_handle = thread::spawn(move || {
@@ -182,7 +181,13 @@ fn collector_reconnects_after_aggregator_restart() {
     let shutdown1_clone = Arc::clone(&shutdown1);
 
     let sink = Box::new(LoggingEventSink::new());
-    let mut aggregator1 = TraceAggregator::new(config.clone(), sink, shutdown1).unwrap();
+    let mut aggregator1 = TraceAggregator::new(
+        config.clone(),
+        sink,
+        shutdown1,
+        Arc::new(MappingStore::new()),
+    )
+    .unwrap();
     let addr = aggregator1.local_addr().unwrap();
     let port = addr.port();
 
@@ -226,7 +231,8 @@ fn collector_reconnects_after_aggregator_restart() {
     let shutdown2_clone = Arc::clone(&shutdown2);
 
     let sink2 = Box::new(LoggingEventSink::new());
-    let mut aggregator2 = TraceAggregator::new(config2, sink2, shutdown2).unwrap();
+    let mut aggregator2 =
+        TraceAggregator::new(config2, sink2, shutdown2, Arc::new(MappingStore::new())).unwrap();
 
     let aggregator2_handle = thread::spawn(move || {
         aggregator2.run().unwrap();
@@ -287,9 +293,13 @@ mod duckdb_tests {
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_clone = Arc::clone(&shutdown);
 
-        let sink = Box::new(DuckDbEventSink::new(db_config).expect("create DuckDB sink"));
+        let mapping_store = Arc::new(MappingStore::new());
+        let sink = Box::new(
+            DuckDbEventSink::new(db_config, Arc::clone(&mapping_store))
+                .expect("create DuckDB sink"),
+        );
 
-        let mut aggregator = TraceAggregator::new(config, sink, shutdown).unwrap();
+        let mut aggregator = TraceAggregator::new(config, sink, shutdown, mapping_store).unwrap();
         let addr = aggregator.local_addr().unwrap();
 
         let aggregator_handle = thread::spawn(move || {

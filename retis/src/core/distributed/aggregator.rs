@@ -13,7 +13,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use log::{debug, error, info, warn};
+use uuid::Uuid;
 
+use super::mapping_store::MappingStore;
+use super::node_mapping::NodeMappingSnapshot;
 use super::protocol::*;
 
 /// Configuration for the trace aggregator.
@@ -102,7 +105,9 @@ impl EventSink for LoggingEventSink {
     fn process_batch(&mut self, session: &SessionInfo, batch: &EventBatch) -> Result<BatchStatus> {
         debug!(
             "Received batch {} from {} ({} events)",
-            batch.batch_id, session.node_name, batch.events.len()
+            batch.batch_id,
+            session.node_name,
+            batch.events.len()
         );
         self.events_processed += batch.events.len() as u64;
         Ok(BatchStatus::Accepted)
@@ -140,8 +145,9 @@ struct ConnectionHandler {
     sessions: Arc<RwLock<HashMap<u64, SessionInfo>>>,
     stats: Arc<AggregatorStats>,
     event_sink: Arc<Mutex<Box<dyn EventSink>>>,
+    mapping_store: Arc<MappingStore>,
     sequence: u64,
-    registered: bool,
+    node_id: Option<[u8; 16]>,
 }
 
 impl ConnectionHandler {
@@ -152,6 +158,7 @@ impl ConnectionHandler {
         sessions: Arc<RwLock<HashMap<u64, SessionInfo>>>,
         stats: Arc<AggregatorStats>,
         event_sink: Arc<Mutex<Box<dyn EventSink>>>,
+        mapping_store: Arc<MappingStore>,
     ) -> Self {
         Self {
             stream,
@@ -160,8 +167,9 @@ impl ConnectionHandler {
             sessions,
             stats,
             event_sink,
+            mapping_store,
             sequence: 0,
-            registered: false,
+            node_id: None,
         }
     }
 
@@ -206,6 +214,7 @@ impl ConnectionHandler {
                 Payload::Register(register) => self.handle_register(register),
                 Payload::EventBatch(batch) => self.handle_event_batch(batch),
                 Payload::Heartbeat(heartbeat) => self.handle_heartbeat(heartbeat),
+                Payload::NodeMapping(snapshot) => self.handle_node_mapping(snapshot),
                 Payload::Shutdown(shutdown) => {
                     info!(
                         "Session {} shutdown: reason={:?}, events_sent={}, batches_sent={}",
@@ -231,7 +240,7 @@ impl ConnectionHandler {
 
     fn handle_register(&mut self, register: Register) -> Result<()> {
         // Reject duplicate registration (defensive against buggy collectors).
-        if self.registered {
+        if self.node_id.is_some() {
             warn!("Session {} already registered", self.session_id);
             let ack = RegisterAck {
                 accepted: false,
@@ -260,7 +269,7 @@ impl ConnectionHandler {
             .expect("sessions lock should not be poisoned")
             .insert(self.session_id, session);
 
-        self.registered = true;
+        self.node_id = Some(register.node_id);
 
         info!(
             "Registered collector: {} (session {}, host: {}, retis: {})",
@@ -280,7 +289,7 @@ impl ConnectionHandler {
     fn handle_event_batch(&mut self, batch: EventBatch) -> Result<()> {
         let event_count = batch.events.len() as u32;
 
-        if !self.registered {
+        if self.node_id.is_none() {
             warn!(
                 "Session {} not registered, rejecting batch",
                 self.session_id
@@ -336,6 +345,27 @@ impl ConnectionHandler {
         self.send_message(Payload::BatchAck(ack))
     }
 
+    fn handle_node_mapping(&mut self, snapshot: NodeMappingSnapshot) -> Result<()> {
+        let Some(node_id) = self.node_id else {
+            warn!(
+                "Session {} not registered, ignoring node mapping update",
+                self.session_id
+            );
+            return Ok(());
+        };
+
+        debug!(
+            "Session {} received node mapping: {} interfaces, {} OVS ports from {}",
+            self.session_id,
+            snapshot.interfaces.len(),
+            snapshot.ovs_ports.len(),
+            Uuid::from_bytes(node_id),
+        );
+
+        self.mapping_store.update(snapshot);
+        Ok(())
+    }
+
     fn handle_heartbeat(&mut self, heartbeat: Heartbeat) -> Result<()> {
         debug!(
             "Session {} heartbeat: ntp_sync={}, offset={}ns, captured={}, dropped={}",
@@ -358,7 +388,7 @@ impl ConnectionHandler {
     fn send_message(&mut self, payload: Payload) -> Result<()> {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
+            .expect("system clock is before Unix epoch")
             .as_nanos() as i64;
 
         let msg = Message::new(self.sequence, timestamp, payload);
@@ -409,8 +439,10 @@ impl ConnectionHandler {
 impl Drop for ConnectionHandler {
     fn drop(&mut self) {
         if let Ok(mut sessions) = self.sessions.write() {
-            if sessions.remove(&self.session_id).is_some() {
+            if let Some(session) = sessions.remove(&self.session_id) {
                 info!("Session {} removed", self.session_id);
+                let node_id = Uuid::from_bytes(session.node_id);
+                self.mapping_store.remove_node(node_id);
             }
         }
         self.stats
@@ -428,6 +460,7 @@ pub(crate) struct TraceAggregator {
     next_session_id: AtomicU64,
     shutdown: Arc<AtomicBool>,
     event_sink: Arc<Mutex<Box<dyn EventSink>>>,
+    mapping_store: Arc<MappingStore>,
     handler_threads: Vec<JoinHandle<()>>,
 }
 
@@ -440,6 +473,7 @@ impl TraceAggregator {
         config: AggregatorConfig,
         event_sink: Box<dyn EventSink>,
         shutdown: Arc<AtomicBool>,
+        mapping_store: Arc<MappingStore>,
     ) -> Result<Self> {
         let listener = TcpListener::bind(&config.listen_addr)
             .with_context(|| format!("binding to {}", config.listen_addr))?;
@@ -458,6 +492,7 @@ impl TraceAggregator {
             next_session_id: AtomicU64::new(1),
             shutdown,
             event_sink: Arc::new(Mutex::new(event_sink)),
+            mapping_store,
             handler_threads: Vec::new(),
         })
     }
@@ -496,6 +531,7 @@ impl TraceAggregator {
                         Arc::clone(&self.sessions),
                         Arc::clone(&self.stats),
                         Arc::clone(&self.event_sink),
+                        Arc::clone(&self.mapping_store),
                     );
 
                     let thread = thread::Builder::new()

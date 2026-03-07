@@ -7,6 +7,7 @@ pub(crate) mod flow_id;
 pub(crate) mod journey;
 #[allow(dead_code)]
 pub(crate) mod journey_builder;
+pub(crate) mod mapping_discovery;
 pub(crate) mod mapping_store;
 pub(crate) mod node_id;
 pub(crate) mod node_mapping;

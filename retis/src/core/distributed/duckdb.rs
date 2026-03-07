@@ -3,14 +3,19 @@
 //! Uses a single-writer Appender pattern for simplicity.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use log::{debug, info, warn};
 
+use retis_pnet::ethernet::EthernetPacket;
+
 use super::aggregator::{EventSink, SessionInfo};
 use super::flow_id::FlowId;
+use super::mapping_store::MappingStore;
+use super::probe::{classify_probe, ProbeDirection};
 use super::protocol::{BatchStatus, EventBatch, WireDistributedMetadata};
-use crate::events::Event;
+use crate::events::{Event, OvsAction, OvsEvent};
 
 fn opt_to_value(opt: &Option<String>) -> duckdb::types::Value {
     match opt {
@@ -63,6 +68,7 @@ struct EventRow {
     flow_id: Option<String>,
     event_type: Option<String>,
     probe_point: Option<String>,
+    next_hop_node_id: Option<String>,
     event_json: String,
 }
 
@@ -71,6 +77,7 @@ impl EventRow {
         distributed: &WireDistributedMetadata,
         event_json: &str,
         session: &SessionInfo,
+        mapping: &Arc<MappingStore>,
     ) -> Result<Self> {
         let event: Event = serde_json::from_str(event_json).context("parsing event JSON")?;
 
@@ -97,7 +104,52 @@ impl EventRow {
             .map(|k| (Some(k.probe_type.clone()), Some(k.symbol.clone())))
             .unwrap_or((None, None));
 
-        let node_id = uuid::Uuid::from_bytes(distributed.node_id).to_string();
+        let node_uuid = uuid::Uuid::from_bytes(distributed.node_id);
+        let node_id = node_uuid.to_string();
+
+        // Resolve next-hop node via OVS output port action.
+        let next_hop_node_id = event
+            .ovs
+            .as_ref()
+            .and_then(|ovs| match ovs {
+                OvsEvent::Action { action_execute } => match &action_execute.action {
+                    Some(OvsAction::Output { output }) => Some(output.port),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .and_then(|port| mapping.resolve_ovs_port(node_uuid, port))
+            .map(|id| id.to_string());
+
+        // Fallback: resolve via destination MAC from raw packet bytes.
+        // Only for TX probes: at TX points (dev_queue_xmit, etc.), the
+        // Ethernet dst MAC is the next L2 hop's MAC. At RX points, the
+        // dst MAC is the receiving node's own MAC (self-edge, not useful).
+        let is_tx_probe = probe_point
+            .as_ref()
+            .map(|p| classify_probe(p) == ProbeDirection::Tx)
+            .unwrap_or(false);
+
+        let next_hop_node_id = if is_tx_probe {
+            next_hop_node_id.or_else(|| {
+                let packet = event.packet.as_ref()?;
+                let eth = EthernetPacket::new(&packet.data.0)?;
+                let dst_mac = eth.get_destination();
+                // Skip broadcast/multicast and zero MACs. Zero MACs come
+                // from synthesized Ethernet headers (skb->mac_header was
+                // invalid).
+                if dst_mac.is_zero() || dst_mac.is_multicast() {
+                    return None;
+                }
+                // MacAddr::Display produces the same colon-separated
+                // lowercase hex format as `ip -j link show` output.
+                mapping
+                    .resolve_mac(&dst_mac.to_string())
+                    .map(|id| id.to_string())
+            })
+        } else {
+            next_hop_node_id
+        };
 
         Ok(Self {
             node_id,
@@ -112,6 +164,7 @@ impl EventRow {
             flow_id,
             event_type,
             probe_point,
+            next_hop_node_id,
             event_json: event_json.to_string(),
         })
     }
@@ -119,6 +172,7 @@ impl EventRow {
 
 pub(crate) struct DuckDbEventSink {
     connection: duckdb::Connection,
+    mapping: Arc<MappingStore>,
     stats: DuckDbStats,
     pending: Vec<EventRow>,
     batch_size: usize,
@@ -126,7 +180,11 @@ pub(crate) struct DuckDbEventSink {
 
 impl DuckDbEventSink {
     /// Creates the database file and schema if they don't exist.
-    pub fn new(config: DuckDbConfig) -> Result<Self> {
+    ///
+    /// `mapping` is shared with the aggregator's `ConnectionHandler`s, which
+    /// update it as node mapping snapshots arrive. The sink reads it during
+    /// `process_batch` to resolve OVS tunnel next-hop node IDs.
+    pub fn new(config: DuckDbConfig, mapping: Arc<MappingStore>) -> Result<Self> {
         info!("Opening DuckDB database at {:?}", config.db_path);
 
         let connection =
@@ -136,6 +194,7 @@ impl DuckDbEventSink {
 
         Ok(Self {
             connection,
+            mapping,
             stats: DuckDbStats::default(),
             pending: Vec::with_capacity(10_000),
             batch_size: 10_000,
@@ -160,6 +219,7 @@ impl DuckDbEventSink {
                 flow_id VARCHAR,
                 event_type VARCHAR,
                 probe_point VARCHAR,
+                next_hop_node_id VARCHAR,
                 event_json VARCHAR NOT NULL,
                 received_at TIMESTAMP DEFAULT current_timestamp
             );
@@ -214,6 +274,7 @@ impl DuckDbEventSink {
                         opt_to_value(&row.flow_id),
                         opt_to_value(&row.event_type),
                         opt_to_value(&row.probe_point),
+                        opt_to_value(&row.next_hop_node_id),
                         duckdb::types::Value::Text(row.event_json.clone()),
                         duckdb::types::Value::Null, // received_at (auto-generated)
                     ])
@@ -246,6 +307,7 @@ impl EventSink for DuckDbEventSink {
                 &wire_event.distributed,
                 &wire_event.event_json,
                 session,
+                &self.mapping,
             ) {
                 Ok(row) => self.pending.push(row),
                 Err(e) => {
@@ -285,6 +347,7 @@ impl Drop for DuckDbEventSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::distributed::mapping_store::MappingStore;
     use std::time::Instant;
     use tempfile::TempDir;
 
@@ -292,7 +355,8 @@ mod tests {
         let temp_dir = TempDir::new().expect("create temp dir");
         let db_path = temp_dir.path().join("test.duckdb");
         let config = DuckDbConfig::new(&db_path);
-        let sink = DuckDbEventSink::new(config).expect("create sink");
+        let sink =
+            DuckDbEventSink::new(config, Arc::new(MappingStore::new())).expect("create sink");
         (sink, temp_dir)
     }
 
