@@ -52,14 +52,24 @@ pub(crate) struct CausalityViolation {
     pub later_hop_idx: usize,
     /// Negative when timestamp order contradicts hop order.
     pub time_diff_ns: i64,
+    /// Whether the journey's hop order was changed by the validator.
+    /// When `true`, node groups were reordered to restore logical
+    /// causality (Source -> Intermediates -> Destination) and the
+    /// remaining timestamp inversion is expected clock skew. When
+    /// `false`, no reordering occurred, the inversion exists in the
+    /// original database ordering.
+    pub reordered: bool,
 }
 
 impl fmt::Display for CausalityViolation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "hop {} -> {} ({:+}ns)",
-            self.earlier_hop_idx, self.later_hop_idx, self.time_diff_ns
+            "hop {} -> {} ({:+}ns{})",
+            self.earlier_hop_idx,
+            self.later_hop_idx,
+            self.time_diff_ns,
+            if self.reordered { ", reordered" } else { "" }
         )
     }
 }

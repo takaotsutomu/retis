@@ -1,4 +1,5 @@
 pub(crate) mod aggregator;
+pub(crate) mod causality;
 pub(crate) mod client;
 pub(crate) mod duckdb;
 pub(crate) mod flow_id;
@@ -10,6 +11,7 @@ pub(crate) mod mapping_store;
 pub(crate) mod node_id;
 pub(crate) mod node_mapping;
 pub(crate) mod ntp;
+pub(crate) mod probe;
 pub(crate) mod protocol;
 #[allow(dead_code)]
 pub(crate) mod query;
